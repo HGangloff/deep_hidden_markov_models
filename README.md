@@ -1,5 +1,17 @@
 # Deep Hidden Markov Models
 
+## Installation
+A simple way is to create a new conda environment and install several packages
+> conda create --name deep_hmm python=3.9
+> conda activate deep_hmm
+> conda install -c anaconda cudnn
+> conda install jax cuda-nvcc -c conda-forge -c nvidia
+> conda install -c anaconda scikit-learn 
+> conda install -c conda-forge matplotlib 
+> conda install -c conda-forge dm-haiku 
+> conda install -c conda-forge optax
+> conda install pillow
+
 Repository linked with the publications
 
 > Deep parameterizations of pairwise and triplet Markov models for unsupervised
