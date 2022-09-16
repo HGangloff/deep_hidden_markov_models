@@ -8,11 +8,15 @@ Hugo Gangloff, Katherine Morales and Yohan Petetin
 import os
 from os import listdir
 from os.path import isfile, join
+import sys
 import numpy as np
 from sklearn.cluster import KMeans
 from PIL import Image
 import matplotlib.pyplot as plt
 import jax
+
+sys.path.insert(1, './models/')
+sys.path.insert(1, './utils/')
 
 from hmcin import MPM_segmentation as hmcin_MPM_segmentation
 from hmcin import EM as hmcin_EM

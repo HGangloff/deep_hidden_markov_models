@@ -127,6 +127,7 @@ def pretrain_networks(X, type_, the_net, the_net_params,
     def print_e(arg, transform):
         e, loss_val = arg
         print("Epoch", e, loss_val)
+
     def scan_on_epoch_loop(carry, e):
         (the_net_params_unfrozen, opt_state_the_net_params_unfrozen) = carry
 
