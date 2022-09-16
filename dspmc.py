@@ -45,7 +45,7 @@ def pretrain_networks(X, type_, the_net, the_net_params,
                 jnp.log(1 - pred_w2) * (1 - train_outputs))
 
     vmap_loss_A_one_batch = jax.vmap(loss_A,
-        in_axes=(None, None, None, 0, 0, 0))
+        in_axes=(None, None, 0, 0, 0))
 
     @jax.jit
     def loss_meanvars(the_net_params_unfrozen, the_net_params_frozen,
@@ -64,10 +64,10 @@ def pretrain_networks(X, type_, the_net, the_net_params,
                 +jnp.mean(jnp.sum(jnp.square(vars - train_outputs[1]))))
 
     vmap_loss_meanvars_one_batch = jax.vmap(loss_meanvars,
-        in_axes=(None, None, None, 0, 1, 0)) # NOTE parallelize on the 2nd axis
+        in_axes=(None, None, 0, 1, 0)) # NOTE parallelize on the 2nd axis
         # of train_outputs argument
 
-    nb_batches = 1 # 64
+    nb_batches = 64
     T = len(X)
 
     if type_ == "meanvars":
@@ -138,6 +138,9 @@ def pretrain_networks(X, type_, the_net, the_net_params,
         the_net_params_unfrozen = optax.apply_updates(the_net_params_unfrozen,
             loss_grad_value)
 
+        train_loss = loss(the_net_params_unfrozen, the_net_params_frozen,
+            train_inputs, train_outputs, pre_seg)
+
         e = jax.lax.cond(
             e % print_rate == 0,
             lambda _: id_tap(print_e, (e, train_loss), result=e),
@@ -161,7 +164,7 @@ def pretrain_networks(X, type_, the_net, the_net_params,
 
     return the_net_params
 
-@partial(jax.jit, static_argnums=(0, 1, 3))
+@partial(jax.jit, static_argnums=(0, 1))
 def reconstruct_A(T, A_net, A_net_params, X):
     r = jnp.squeeze(X[:T-1])
     def scan_h_t_1(carry, h_t_1):
@@ -180,8 +183,8 @@ def reconstruct_A(T, A_net, A_net_params, X):
 
     return A
 
-@partial(jax.jit, static_argnums=(0, 1, 3))
-def reconstruct_means_stds(T, meanvars_net, meanvars_net_params X):
+@partial(jax.jit, static_argnums=(0, 1))
+def reconstruct_means_stds(T, meanvars_net, meanvars_net_params, X):
     stds = jnp.empty((2, T))
     means = jnp.empty((2, T))
 
@@ -281,7 +284,7 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
 
     vmap_compute_llkh_wrapper_one_batch = jax.vmap(
         compute_llkh_wrapper_one_batch,
-        in_axes=(None, None, None, None, None, None, 0)
+        in_axes=(None, None, None, None, 0)
     )
 
     @jax.jit
@@ -380,14 +383,20 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         print("Pretraining by backpropagation")
         if gpu_available:
             X_gpu = jax.device_put(X, gpus[0])
+            # put the next init arguments on GPU because non deep models have
+            # been trained on CPUs
+            A_init_gpu = jax.device_put(A_init, gpus[0])
+            means_init_gpu = jax.device_put(means_init, gpus[0])
+            stds_init_gpu = jax.device_put(stds_init, gpus[0])
+            pre_seg_gpu = jax.device_put(pre_seg, gpus[0])
         else:
             X_gpu = X
 
         try:
             meanvars_net_params = pretrain_networks(X_gpu, "meanvars",
                 meanvars_net, meanvars_net_params,
-                pre_seg[:len(X)], A_init,
-                means_init, stds_init)
+                pre_seg_gpu[:len(X)], A_init_gpu,
+                means_init_gpu, stds_init_gpu)
         except RuntimeError:
             # probably RESOURCE_EXHAUSTED on the GPU 
             print("Problem with pretraining on GPU, not enough memory ?")
@@ -398,17 +407,17 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
                 means_init, stds_init)
         try:
             A_net_params = pretrain_networks(X_gpu, 
-            "A", A_net, A_net_params, pre_seg,
-                A_init, means_init, stds_init)
+            "A", A_net, A_net_params, pre_seg_gpu,
+                A_init_gpu, means_init_gpu, stds_init_gpu)
         except RuntimeError:
             # probably RESOURCE_EXHAUSTED on the GPU 
             print("Problem with pretraining on GPU, not enough memory ?")
             X_cpu = jax.device_put(X, cpus[0])
-            A_net_params, = pretrain_networks(X_cpu, 
+            A_net_params = pretrain_networks(X_cpu, 
             "A", A_net, A_net_params, pre_seg,
                 A_init, means_init, stds_init)
 
-        # Back to CPU
+        # NOTE Back to CPU
         meanvars_net_params = jax.device_put(meanvars_net_params, cpus[0])
         A_net_params = jax.device_put(A_net_params, cpus[0])
 

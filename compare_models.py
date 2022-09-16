@@ -27,6 +27,8 @@ from dpmc import gradient_llkh as dpmc_gradient_llkh
 
 from chain_to_image_functions import chain_to_image, image_to_chain
 
+#os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
 def seg_moving_means(exp_name, key):
     np.seterr(all="warn")
     img_dir = "./test_images/cattles256/"
@@ -75,6 +77,7 @@ def seg_moving_means(exp_name, key):
 
 
             # KMeans segmentation
+            print("KMeans segmentation")
             kmeans_seg = KMeans(n_clusters=2).fit(X.reshape((-1, 1))).labels_
             kmeans_e = np.count_nonzero(kmeans_seg != H) / H.shape[0]
             if kmeans_e > 0.5:
@@ -98,7 +101,11 @@ def seg_moving_means(exp_name, key):
             A[1] /= np.sum(A[1])
 
             # HMCIN segmentation
-            (hmcin_A, hmcin_means, hmcin_stds) = hmcin_EM(T, X, nb_iter=50,
+            print("HMCIN segmentation")
+            # Force CPU computation, nothing is batched here to go on GPU
+            cpus = jax.devices("cpu")
+            X_cpu = jax.device_put(X, cpus[0])
+            (hmcin_A, hmcin_means, hmcin_stds) = hmcin_EM(T, X_cpu, nb_iter=50,
                 A_init=A, means_init=means, stds_init=stds)
             hmcin_mpm_seg, hmcin_e = hmcin_MPM_segmentation(T, X,
                 hmcin_A, hmcin_means, hmcin_stds, H)
@@ -109,8 +116,13 @@ def seg_moving_means(exp_name, key):
             #    (img_hmcin_seg * 255).astype(np.uint8)
             #).save("./figures/hmcin.png")
 
+            # SPMC segmentation
+            print("SPMC segmentation")
+            # Force CPU computation, nothing is batched here to go on GPU
+            cpus = jax.devices("cpu")
+            X_cpu = jax.device_put(X, cpus[0])
             (spmc_A, spmc_means, spmc_stds, spmc_A_sig_params,
-                spmc_norm_params) = spmc_gradient_llkh(T, X, nb_iter=50,
+                spmc_norm_params) = spmc_gradient_llkh(T, X_cpu, nb_iter=50,
                 A_init=hmcin_A, means_init=hmcin_means, stds_init=hmcin_stds,
                 H_gt=H, alpha=0.01)
             spmc_mpm_seg, spmc_e = spmc_MPM_segmentation(T, X,
@@ -122,8 +134,13 @@ def seg_moving_means(exp_name, key):
             #    (img_spmc_seg * 255).astype(np.uint8)
             #).save("./figures/spmc.png")
 
+            # PMC segmentation
+            print("PMC segmentation")
+            # Force CPU computation, nothing is batched here to go on GPU
+            cpus = jax.devices("cpu")
+            X_cpu = jax.device_put(X, cpus[0])
             (pmc_A, pmc_means, pmc_stds, pmc_A_sig_params, pmc_norm_params) = \
-                pmc_gradient_llkh(T, X, nb_iter=50, A_init=hmcin_A,
+                pmc_gradient_llkh(T, X_cpu, nb_iter=50, A_init=hmcin_A,
                 means_init=hmcin_means, stds_init=hmcin_stds, H_gt=H,
                 alpha=0.01)
             pmc_mpm_seg, pmc_e = pmc_MPM_segmentation(T, X, pmc_A_sig_params,
@@ -135,6 +152,8 @@ def seg_moving_means(exp_name, key):
             #    (img_pmc_seg * 255).astype(np.uint8)
             #).save("./figures/pmc.png")
 
+            # DSPMC segmentation
+            print("DSPMC segmentation")
             key, subkey = jax.random.split(key)
             (dspmc_A, dspmc_means, dspmc_stds,
                 dspmc_A_ffnet_and_params, dspmc_meanvars_ffnet_and_params,
@@ -158,6 +177,8 @@ def seg_moving_means(exp_name, key):
             #    (img_dspmc_seg * 255).astype(np.uint8)
             #).save("./figures/dspmc.png")
 
+            # DPMC segmentation
+            print("DPMC segmentation")
             key, subkey = jax.random.split(key)
             (dpmc_A, dpmc_means, dpmc_stds,
                 dpmc_A_ffnet_and_params, dpmc_meanvars_ffnet_and_params) = \
@@ -194,9 +215,12 @@ def seg_moving_means(exp_name, key):
                 print("\n", end="", file=f)
 
 if __name__ == "__main__":
-    jax.config.update("jax_platform_name", 'cpu')
-    os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = "false" # do not preallocate GPU
-    os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = "platform" # dynamically
+    cpus = jax.devices("cpu")
+    gpus = jax.devices("gpu")
+    print(cpus, gpus) # even though jax.devices() only shows the GPU there is
+    # always CPU to be found
+    #os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = "false" # do not preallocate GPU
+    #os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = "platform" # dynamically
 
     np.random.seed(0)
     rng = jax.random.PRNGKey(0)
