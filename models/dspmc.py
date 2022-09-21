@@ -5,6 +5,7 @@ Deep Semi Pairwise Markov Chains
 
 import numpy as np
 from functools import partial
+import numpy as np
 import jax.numpy as jnp
 import jax
 from jax.scipy.special import logsumexp
@@ -527,12 +528,12 @@ def MPM_segmentation(T, X, A_net, A_net_params,
 
     post_marginals_probas = jax_get_post_marginals_probas(lalpha, lbeta)
 
-    mpm_seg = jnp.argmax(post_marginals_probas, axis=1)
+    mpm_seg = np.argmax(post_marginals_probas, axis=1)
 
     if H is not None:
-        e = jnp.count_nonzero(mpm_seg != H) / H.shape[0]
+        e = np.count_nonzero(mpm_seg != H) / H.shape[0]
         print("Error in MPM segmentation", e)
     else:
         e = None
 
-    return jnp.asarray(mpm_seg), e
+    return np.asarray(mpm_seg), e

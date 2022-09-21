@@ -218,4 +218,4 @@ def MPM_segmentation(T, X, A_sig_params, abc, H=None):
     else:
         e = None
 
-    return mpm_seg, e
+    return np.asarray(mpm_seg), e

@@ -5,7 +5,6 @@ Deep Pairwise Markov Chains
 
 from functools import partial
 import numpy as np
-
 import jax.numpy as jnp
 import jax
 from jax.scipy.special import logsumexp
@@ -537,4 +536,4 @@ def MPM_segmentation(T, X, A_net, A_net_params,
     else:
         e = None
 
-    return mpm_seg, e
+    return np.asarray(mpm_seg), e
