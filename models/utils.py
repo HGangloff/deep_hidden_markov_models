@@ -14,11 +14,12 @@ def jax_gauss(x, mu, sigma):
     return res
 
 def jax_loggauss(x, mu, sigma):
+#    print((-jnp.log(jnp.sqrt(2 * jnp.pi * sigma ** 2)) -0.5 *
+#        (x - mu) ** 2 / sigma ** 2).shape)
     return (-jnp.log(jnp.sqrt(2 * jnp.pi * sigma ** 2)) -0.5 *
         (x - mu) ** 2 / sigma ** 2)
 
-vmap_jax_loggauss = jax.vmap(jax_loggauss, in_axes=(0, None, None))
-
+vmap_jax_loggauss = jax.vmap(jax_loggauss, in_axes=(1, 0, 0))
 
 def jax_dot(a, b):
 

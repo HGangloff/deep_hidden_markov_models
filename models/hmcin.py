@@ -9,17 +9,16 @@ import jax.numpy as jnp
 import jax
 from jax.scipy.stats import norm
 from jax.scipy.special import logsumexp
-from jax.experimental.host_callback import id_print, id_tap
 
 from utils import (jax_loggauss, vmap_jax_loggauss)
 
 @partial(jax.jit, static_argnums=(0, 3))
-def jax_compute_llkh(T, lX_pdf, lA):
+def jax_compute_llkh(T, lX_pdf, lA, nb_classes=2):
     """
     Compute the loglikelihood of an observed sequence given model parameters
     Note that it needs an forward algorithm without rescaling
     """
-    alpha_init = jnp.log(jnp.array([0.5, 0.5])) + lX_pdf[:, 0]
+    alpha_init = jnp.log(1 / nb_classes) + lX_pdf[:, 0]
 
     def scan_fn_a(alpha_t_1, t):
         alpha_t = jax_forward_one_step_no_rescaled(alpha_t_1, t, lX_pdf, lA)
@@ -51,7 +50,7 @@ def jax_forward_one_step_rescaled(alpha_t_1, t, lX_pdf, lA):
 @jax.jit
 def jax_beta_one_step(beta_tp1, t, lX_pdf, lA):
     """
-    Note: it is rescaled
+    It is rescaled
     """
     beta_t = logsumexp(lA + lX_pdf[:, t + 1] + beta_tp1, axis=1)
     beta_t -= logsumexp(beta_t)
@@ -59,10 +58,10 @@ def jax_beta_one_step(beta_tp1, t, lX_pdf, lA):
     return beta_t
 
 @partial(jax.jit, static_argnums=(0, 3))
-def jax_log_forward_backward(T, lX_pdf, lA):
-    alpha_init = jnp.log(jnp.array([0.5, 0.5])) + lX_pdf[:, 0]
+def jax_log_forward_backward(T, lX_pdf, lA, nb_classes=2):
+    alpha_init = jnp.log(1 / nb_classes) + lX_pdf[:, 0]
 
-    beta_init = jnp.log(jnp.array([1., 1.]))
+    beta_init = jnp.log(jnp.ones(nb_classes))
 
     def scan_fn_a(alpha_t_1, t):
         alpha_t = jax_forward_one_step_rescaled(alpha_t_1, t, lX_pdf, lA)
@@ -91,23 +90,16 @@ def jax_get_post_marginals_probas(lalpha, lbeta):
     return pmp
 
 @partial(jax.jit, static_argnums=(0, 5))
-def jax_get_post_pair_marginals_probas(T, lalpha, lbeta, lA, lX_pdf):
+def jax_get_post_pair_marginals_probas(T, lalpha, lbeta, lA, lX_pdf,
+    nb_classes=2):
+    post_pair_marginals_probas = jnp.empty((T - 1, nb_classes, nb_classes))
 
-    def scan_h_t_1(carry1, h_t_1):
-        lalpha, lA, lX_pdf, lbeta = carry1
-        def scan_h_t(carry2, h_t):
-            lbeta, lA, lX_pdf = carry2
-            res = lA[:, h_t][..., None] + lX_pdf[h_t, 1:] + lbeta[1:, h_t]
-            return (lbeta, lA, lX_pdf), res
-        carry2 = lbeta, lA, lX_pdf
-        _, res_h_t = jax.lax.scan(scan_h_t, carry2, jnp.arange(2))
-        
-        res = lalpha[:-1, h_t_1] + res_h_t[:, h_t_1]
-        return (lalpha, lA, lX_pdf, lbeta), res
-    carry1 = lalpha, lA, lX_pdf, lbeta
-    _, post_pair_marginals_probas = jax.lax.scan(scan_h_t_1, carry1,
-        jnp.arange(2))
-    post_pair_marginals_probas = jnp.moveaxis(post_pair_marginals_probas, -1, 0)
+    for h_t_1 in range(nb_classes):
+        for h_t in range(nb_classes):
+            post_pair_marginals_probas = post_pair_marginals_probas.at[:, h_t_1, h_t].set(
+                lalpha[:T - 1, h_t_1] +
+                lA[h_t_1, h_t] +
+                lX_pdf[h_t, 1:] + lbeta[1:, h_t])
 
     post_pair_marginals_probas -= logsumexp(post_pair_marginals_probas,
         axis=(1, 2), keepdims=True)
@@ -116,69 +108,81 @@ def jax_get_post_pair_marginals_probas(T, lalpha, lbeta, lA, lX_pdf):
     ppmp = jnp.where(ppmp > 0.99999, 0.99999, ppmp)
     return ppmp
 
-def EM(T, X, nb_iter, A_init, means_init, stds_init):
+def EM(T, X, nb_iter=1000, A_init=None, means_init=None,
+    stds_init=None, nb_classes=2, nb_channels=1):
+
 
     # initialisation for the parameters
     A = A_init
-    means = jnp.asarray(means_init)
-    stds = jnp.asarray(stds_init)
+    means = means_init
+    stds = stds_init
 
-    def scan_on_iter_loop(carry, k):
-        (means, stds, A) = carry
-        k = id_print(k, what="####### ITERATION #######")
-        T = len(X)
-        lX_pdf = jnp.stack([jax_loggauss(
-            X, means[i], stds[i]) for i in range(2)],
-            axis=0)
+    X_train = X
+    T = len(X_train)
+
+    llkh_train_list = []
+    llkh_test_list = []
+
+    for k in range(nb_iter):
+        print("EM iteration", k)
+        # TRAIN
+        T = len(X_train)
+        lX_pdf = jnp.stack([jnp.sum(vmap_jax_loggauss(
+            X_train, means[i, :], stds[i, :]), axis=0)
+                            for i in range(nb_classes)], axis=0)
         lA = jnp.log(A)
-        lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA)
+        lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA,
+            nb_classes=nb_classes)
 
         post_marginals_probas = jax_get_post_marginals_probas(lalpha, lbeta)
         post_pair_marginals_probas = jax_get_post_pair_marginals_probas(T,
-                                        lalpha, lbeta, lA, lX_pdf)
+                                        lalpha, lbeta, lA, lX_pdf,
+                                        nb_classes=nb_classes)
+        new_A = np.zeros(A.shape)
+        new_means = np.zeros(means.shape)
+        new_stds = np.zeros(stds.shape)
 
+        # the None that is needed next and below is strange
+        tmp_for_means= jnp.stack([post_marginals_probas[:, h][:, None] * (X_train)
+                                 for h in range(nb_classes)], axis=1)
 
-        A = jnp.stack([
-            jnp.stack([
-                jnp.sum(post_pair_marginals_probas[:, h_t_1, h_t]) /
-                jnp.sum(post_pair_marginals_probas[:, h_t_1])
-                for h_t in range(2)],
-                axis=0
-                )
-            for h_t_1 in range(2)],
-            axis=0
-        )
-
-        tmp_for_means= jnp.stack([post_marginals_probas[:, h] * (X)
-                                 for h in range(2)], axis=1)
-        means = jnp.stack([
-                jnp.sum(tmp_for_means[:, h_t]) /
-                jnp.sum(post_marginals_probas[:, h_t]) for h_t in range(2)],
-                axis=0)
-
+        for h_t in range(nb_classes):
+            for h_t_1 in range(nb_classes):
+                new_A[h_t_1, h_t] += (jnp.sum(post_pair_marginals_probas[:,
+                    h_t_1, h_t]) / jnp.sum(post_pair_marginals_probas[:, h_t_1]
+                    ))
+            new_means[h_t] = (jnp.sum(tmp_for_means[:, h_t], axis=0) /
+                jnp.sum(post_marginals_probas[:, h_t]))
         tmp_for_stds = jnp.stack([
-            post_marginals_probas[:, h] * (X - means[h]) ** 2
-            for h in range(2)], axis=1)
-        stds = jnp.stack([
-                jnp.sqrt((jnp.sum(tmp_for_stds[:, h_t]) /
-                jnp.sum(post_marginals_probas[:, h_t]))) for h_t in
-                range(2)],
-                axis=0)
-        stds = jnp.where(stds <= 1e-5, 1e-5, stds)
+            post_marginals_probas[:, h][:, None] * (X_train - new_means[h]) ** 2
+            for h in range(nb_classes)], axis=1)
+        for h_t in range(nb_classes):
+            new_stds[h_t] = jnp.sqrt((jnp.sum(tmp_for_stds[:, h_t], axis=0) /
+                jnp.sum(post_marginals_probas[:, h_t])))
+        new_stds = jnp.where(new_stds <= 1e-5, 1e-5, new_stds)
 
-        return ((means, stds, A), k)
-    carry = (means, stds, A)
-    (means, stds, A), _ = jax.lax.scan(scan_on_iter_loop, carry,
-        jnp.arange(0, nb_iter))
+        A = new_A
+        means = new_means
+        stds = new_stds
 
+        lX_pdf = jnp.stack([jnp.sum(vmap_jax_loggauss(
+            X_train, jnp.array([means[i, c] for c in range(nb_channels)]),
+                jnp.array([stds[i, c] for c in range(nb_channels)])), axis=0)
+                            for i in range(nb_classes)], axis=0)
+        lA = jnp.log(A)
+        llkh_train = jax_compute_llkh(T, lX_pdf, lA)
+        llkh_train_list.append(llkh_train / T)
 
     return A, means, stds
                     
-def MPM_segmentation(T, X, A, means, stds, H=None):
-    lX_pdf = jnp.stack([vmap_jax_loggauss(
-        X, means[i], stds[i]) for i in range(2)], axis=0)
+def MPM_segmentation(T, X, A, means, stds, H=None,
+                     nb_channels=1, nb_classes=2):
+    lX_pdf = jnp.stack([jnp.sum(vmap_jax_loggauss(
+        X, means[i, :], stds[i, :]), axis=0)
+                        for i in range(nb_classes)], axis=0)
     lA = jnp.log(A)
-    lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA)
+    lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA,
+        nb_classes=nb_classes)
 
     post_marginals_probas = jax_get_post_marginals_probas(lalpha, lbeta)
 
