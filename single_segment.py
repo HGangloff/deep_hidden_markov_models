@@ -36,9 +36,25 @@ from chain_to_image_functions import chain_to_image, image_to_chain
 def seg_image(img_path, key):
     np.seterr(all="warn")
     img = np.array(Image.open(img_path))
-    X = image_to_chain(img).astype(np.float64)
+
+    r, rr = 1, 2
+    obs = [0.5]
+    H = image_to_chain(img)[:]
+    H[H == 255] = 2
+    H[H == 128] = 1
+    plt.imshow(img);plt.show() 
+    print(img.shape, H.shape)
+    b = np.array([0., float(r), float(rr)])
+    for i in range(1, 256*256):
+        obs.append(np.sin(b[H[i]] + obs[-1]) + np.random.randn()*0.5)
+    X = np.asarray(obs).astype(np.float64)
     X = (X - np.amin(X)) / (np.amax(X) - np.amin(X))
-    T = len(X)
+    plt.imshow(chain_to_image(X));plt.show() 
+    T = len(H)
+
+    #X = image_to_chain(img).astype(np.float64)
+    #X = (X - np.amin(X)) / (np.amax(X) - np.amin(X))
+    #T = len(X)
 
     if X.ndim == 1:
         X = X[:, None]
@@ -74,6 +90,8 @@ def seg_image(img_path, key):
     hmcin_mpm_seg, _ = hmcin_MPM_segmentation(T, X,
         hmcin_A, hmcin_means, hmcin_stds, nb_classes=nb_classes,
         nb_channels=nb_channels)
+    #plt.imshow(chain_to_image(hmcin_mpm_seg))
+    #plt.show()
 
     # SPMC segmentation
     print("SPMC segmentation")
@@ -149,6 +167,8 @@ def seg_image(img_path, key):
     axes[0, 2].set_title("SPMC")
     #axes[1, 0].imshow(chain_to_image(pmc_mpm_seg.astype(np.uint32)))
     #axes[1, 0].set_title("PMC")
+    axes[1, 0].imshow(chain_to_image(X))
+    axes[1, 0].set_title("X")
     axes[1, 1].imshow(chain_to_image(dspmc_mpm_seg.astype(np.uint32)))
     axes[1, 1].set_title("DSPMC")
     #axes[1, 2].imshow(chain_to_image(dpmc_mpm_seg.astype(np.uint32)))
@@ -174,6 +194,8 @@ if __name__ == "__main__":
     # NOTE: jax will now break if nan appear
     jax.config.update("jax_debug_nans", True)
 
-    img_path = './test_images/dragonfly_bw.png'
+    #img_path = './test_images/dragonfly_bw.png'
+    img_path = './test_images/cattle_3cl.png'
     #img_path = './test_images/leonberger_200_bw.png'
+
     seg_image(img_path, key)
