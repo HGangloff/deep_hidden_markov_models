@@ -93,7 +93,7 @@ def pretrain_networks(X, type_, the_net, the_net_params,
         loss = loss_A
 
         alpha = 0.001
-        num_epochs = 300
+        num_epochs = 500
         train_outputs = AA_init[pre_seg[:-1], :,
                                 np.arange(T-1)]
 
@@ -485,7 +485,6 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         llkh = compute_llkh_wrapper_one_batch(A_net_params_unfrozen, A_net_params_frozen,
             meanvars_net_params_unfrozen, meanvars_net_params_frozen, X,
             nb_classes, nb_channels)
-        llkh = - llkh
         print("likelihood", llkh)
 
     # final parameters

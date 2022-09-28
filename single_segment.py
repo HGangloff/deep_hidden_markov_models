@@ -33,23 +33,30 @@ from dpmc import gradient_llkh as dpmc_gradient_llkh
 from chain_to_image_functions import chain_to_image, image_to_chain
 
 
-def seg_image(img_path, key):
+def seg_image(img_path, img_name, key):
     np.seterr(all="warn")
     img = np.array(Image.open(img_path))
+    img_ = (img - np.amin(img)) / (np.amax(img) - np.amin(img))
+    Image.fromarray(
+        (img_ * 255).astype(np.uint8)
+    ).save("./figures/" + img_name + "_img.png")
 
-    r, rr = 1, 2
+    r, rr, r3, r4 = 0.75, 1.5, 2.25, 3
     obs = [0.5]
     H = image_to_chain(img)[:]
     H[H == 255] = 2
     H[H == 128] = 1
-    plt.imshow(img);plt.show() 
+    H[H == 100] = 3
+    H[H == 156] = 4
     print(img.shape, H.shape)
-    b = np.array([0., float(r), float(rr)])
+    b = np.array([0., float(r), float(rr), float(r3), float(r4)])
     for i in range(1, 256*256):
         obs.append(np.sin(b[H[i]] + obs[-1]) + np.random.randn()*0.5)
     X = np.asarray(obs).astype(np.float64)
     X = (X - np.amin(X)) / (np.amax(X) - np.amin(X))
-    plt.imshow(chain_to_image(X));plt.show() 
+    Image.fromarray(
+        (chain_to_image(X) * 255).astype(np.uint8)
+    ).save("./figures/" + img_name + "_X.png")
     T = len(H)
 
     #X = image_to_chain(img).astype(np.float64)
@@ -59,12 +66,12 @@ def seg_image(img_path, key):
     if X.ndim == 1:
         X = X[:, None]
 
-    nb_classes = 3
+    nb_classes = 5
     nb_channels = 1
 
     # KMeans segmentation
     print("KMeans segmentation")
-    kmeans_seg = KMeans(n_clusters=nb_classes).fit(X.reshape((-1, 1))).labels_
+    kmeans_seg = KMeans(n_clusters=nb_classes).fit(X.reshape((-1, nb_channels))).labels_
     means = np.array([np.mean(X[kmeans_seg == h], axis=0) for h in range(nb_classes)])
     stds = np.array([np.std(X[kmeans_seg == h], axis=0) for h in range(nb_classes)])
     if means.ndim == 1:
@@ -92,6 +99,12 @@ def seg_image(img_path, key):
         nb_channels=nb_channels)
     #plt.imshow(chain_to_image(hmcin_mpm_seg))
     #plt.show()
+    img_hmcin_seg = chain_to_image(hmcin_mpm_seg.astype(np.int32))
+    img_hmcin_seg = ((img_hmcin_seg - np.amin(img_hmcin_seg)) /
+        (np.amax(img_hmcin_seg) - np.amin(img_hmcin_seg)))
+    Image.fromarray(
+        (img_hmcin_seg * 255).astype(np.uint8)
+    ).save("./figures/" + img_name + "_hmcin.png")
 
     # SPMC segmentation
     print("SPMC segmentation")
@@ -101,10 +114,17 @@ def seg_image(img_path, key):
     (spmc_A, spmc_means, spmc_stds, spmc_A_sig_params,
         spmc_norm_params) = spmc_gradient_llkh(T, X_cpu, nb_iter=50,
         A_init=hmcin_A, means_init=hmcin_means, stds_init=hmcin_stds,
-        alpha=0.01, nb_classes=nb_classes, nb_channels=nb_channels)
+        alpha=0.01,#0.01,
+        nb_classes=nb_classes, nb_channels=nb_channels)
     spmc_mpm_seg, _ = spmc_MPM_segmentation(T, X,
         spmc_A_sig_params, spmc_norm_params, nb_classes=nb_classes,
         nb_channels=nb_channels)
+    img_spmc_seg = chain_to_image(spmc_mpm_seg.astype(np.int32))
+    img_spmc_seg = ((img_spmc_seg - np.amin(img_spmc_seg)) /
+        (np.amax(img_spmc_seg) - np.amin(img_spmc_seg)))
+    Image.fromarray(
+        (img_spmc_seg * 255).astype(np.uint8)
+    ).save("./figures/" + img_name + "_spmc.png")
 
     ## PMC segmentation
     #print("PMC segmentation")
@@ -129,7 +149,8 @@ def seg_image(img_path, key):
         A_sig_params_init=spmc_A_sig_params,
         norm_params_init=spmc_norm_params,
         with_pretrain=True, with_output_constraint=True,
-        with_gpu=True, alpha=0.01,
+        with_gpu=True,
+        alpha=0.00001,
         nb_classes=nb_classes, nb_channels=nb_channels
         )
     dspmc_mpm_seg, _ = dspmc_MPM_segmentation(T, X,
@@ -139,6 +160,12 @@ def seg_image(img_path, key):
         dspmc_meanvars_ffnet_and_params[1],
         nb_classes=nb_classes, nb_channels=nb_channels
         )
+    img_dspmc_seg = chain_to_image(dspmc_mpm_seg.astype(np.int32))
+    img_dspmc_seg = ((img_dspmc_seg - np.amin(img_dspmc_seg)) /
+        (np.amax(img_dspmc_seg) - np.amin(img_dspmc_seg)))
+    Image.fromarray(
+        (img_dspmc_seg * 255).astype(np.uint8)
+    ).save("./figures/" + img_name + "_dspmc.png")
 
     ## DPMC segmentation
     #print("DPMC segmentation")
@@ -195,7 +222,9 @@ if __name__ == "__main__":
     jax.config.update("jax_debug_nans", True)
 
     #img_path = './test_images/dragonfly_bw.png'
-    img_path = './test_images/cattle_3cl.png'
-    #img_path = './test_images/leonberger_200_bw.png'
+    img_path = './test_images/cattle_5cl.png'
+    img_name = 'cattle3'
+    #img_path = './test_images/great_pyrenees_124.png'
+    #img_name = 'great_pyrenees_124'
 
-    seg_image(img_path, key)
+    seg_image(img_path, img_name, key)

@@ -72,9 +72,6 @@ def gradient_llkh(T, X, nb_iter, A_init, means_init,
     opt_state_A_sig_params_0 = opt.init(A_sig_params_0)
     opt_state_A_sig_params_1 = opt.init(A_sig_params_1)
 
-    llkh_train_list = []
-    e_list = []
-
     for k in range(nb_iter):
         print("\nGradient EM iteration", k)
         T = len(X)
@@ -154,7 +151,7 @@ def gradient_llkh(T, X, nb_iter, A_init, means_init,
         lA = jnp.log(A)
         llkh_train = jax_compute_llkh(T, lX_pdf, lA, nb_classes=nb_classes,
             nb_channels=nb_channels)
-        llkh_train_list.append(llkh_train / T)
+        print("likelihood", llkh_train)
 
     # final parameters
     T = len(X)
