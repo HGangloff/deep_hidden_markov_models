@@ -89,17 +89,25 @@ def jax_get_post_marginals_probas(lalpha, lbeta):
 
 @partial(jax.jit, static_argnums=(0,))
 def jax_get_post_pair_marginals_probas(T, lalpha, lbeta, lA, lX_pdf,
-    nb_classes=2):
-    post_pair_marginals_probas = jnp.empty((T - 1, nb_classes, nb_classes))
-
-    for h_t_1 in range(nb_classes):
-        for h_t in range(nb_classes):
-            post_pair_marginals_probas = jax.ops.index_update(
-                post_pair_marginals_probas,
-                jax.ops.index[:, h_t_1, h_t],
-                lalpha[:T - 1, h_t_1] +
-                lA[h_t_1, h_t, :T - 1] +
-                lX_pdf[h_t, 1:] + lbeta[1:, h_t])
+    nb_classes):
+    def scan_h_t_1(carry1, h_t_1):
+        lalpha, lA, lX_pdf, lbeta = carry1
+        def scan_h_t(carry2, h_t):
+            lbeta, lA, lX_pdf = carry2
+            res = lA[:, h_t, :T - 1] + lX_pdf[h_t, 1:] + lbeta[1:, h_t]
+            return (lbeta, lA, lX_pdf), res
+        carry2 = lbeta, lA, lX_pdf
+        _, res_h_t = jax.lax.scan(scan_h_t, carry2, jnp.arange(nb_classes))
+        # res_h_t is (h_t: 2, h_t_1: 2, T - 1), NOTE res_h_t is stacked on h_t !
+        
+        res = lalpha[:-1, h_t_1] + res_h_t[:, h_t_1]
+        return (lalpha, lA, lX_pdf, lbeta), res
+    carry1 = lalpha, lA, lX_pdf, lbeta
+    _, post_pair_marginals_probas = jax.lax.scan(scan_h_t_1, carry1,
+        jnp.arange(nb_classes))
+    # post_pair_marginals_probas is (h_t_1: 2, h_t: 2, T - 1)
+    post_pair_marginals_probas = jnp.moveaxis(post_pair_marginals_probas, -1, 0)
+    # post_pair_marginals_probas is (T - 1, h_t_1: 2, h_t: 2)
 
     post_pair_marginals_probas -= logsumexp(post_pair_marginals_probas,
         axis=(1, 2), keepdims=True)

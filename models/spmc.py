@@ -15,20 +15,26 @@ import optax
 
 from utils import (jax_loggauss, vmap_jax_loggauss)
 from spmc_fb_and_posterior import (jax_log_forward_backward,
-    jax_get_post_marginals_probas, jax_get_post_pair_marginals_probas,
+    jax_get_post_marginals_probas,
     jax_compute_llkh)
 
-def reconstruct_A(T, A_sig_params_0, A_sig_params_1, X, nb_classes=2):
-    A = jnp.ones((nb_classes, nb_classes, T - 1))
-
-    for h_t_1 in range(nb_classes):
-        tmp = jnp.exp(jnp.dot(X[:T - 1], jnp.swapaxes(A_sig_params_0[h_t_1], 0, 1))
+@partial(jax.jit, static_argnums=(0, 4))
+def reconstruct_A(T, A_sig_params_0, A_sig_params_1, X, nb_classes):
+    def scan_h_t_1(carry, h_t_1):
+        A_sig_params_0, A_sig_params_1 = carry
+        tmp = jnp.exp(jnp.dot(X[:-1], jnp.swapaxes(A_sig_params_0[h_t_1], 0, 1))
                         + A_sig_params_1[h_t_1])
         tmp = tmp.T
         tmp = tmp / jnp.sum(tmp, axis=0, keepdims=True)
-        A = A.at[h_t_1].set(tmp)
-        A = jnp.where(A < 1e-5, 1e-5, A)
-        A = jnp.where(A > 0.99999, 0.99999, A)
+        return (A_sig_params_0, A_sig_params_1), tmp
+    carry = (A_sig_params_0, A_sig_params_1)
+
+    # we get back the stack of samples (ie, the stack of second position return
+    # of the scan function)
+    _, A = jax.lax.scan(scan_h_t_1, carry, jnp.arange(nb_classes))
+
+    A = jnp.where(A < 1e-5, 1e-5, A)
+    A = jnp.where(A > 0.99999, 0.99999, A)
 
     return A
 
@@ -67,18 +73,26 @@ def gradient_llkh(T, X, nb_iter, A_init, means_init,
     stds = np.stack([stds_init for t in range(T)], axis=2)
     # means and stds are [nb_classes, nb_channels, T]
 
+    # needed for the initialization of the carry of the main loop
+    a = np.zeros((nb_classes, nb_channels))
+    b = np.zeros((nb_classes, nb_channels))
+    c = np.zeros((nb_classes, nb_channels))
+
     opt = optax.adam(alpha)
 
     opt_state_A_sig_params_0 = opt.init(A_sig_params_0)
     opt_state_A_sig_params_1 = opt.init(A_sig_params_1)
 
-    for k in range(nb_iter):
-        print("\nGradient EM iteration", k)
+    def scan_on_iter_loop(carry, k):
+        (A_sig_params_0, A_sig_params_1, a, b, c, means, stds, opt_state_A_sig_params_0,
+            opt_state_A_sig_params_1) = carry
         T = len(X)
         lX_pdf = jnp.stack([jnp.sum(vmap_jax_loggauss(
             X, jnp.array([means[i, c] for c in range(nb_channels)]),
                 jnp.array([stds[i, c] for c in range(nb_channels)])), axis=0)
                             for i in range(nb_classes)], axis=0)
+        A = reconstruct_A(T, A_sig_params_0, A_sig_params_1, X,
+            nb_classes=nb_classes)
         lA = jnp.log(A)
         lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA,
             nb_classes=nb_classes)
@@ -101,57 +115,75 @@ def gradient_llkh(T, X, nb_iter, A_init, means_init,
         A_sig_params_0 = optax.apply_updates(A_sig_params_0, llkh_grad_A_sig_params_0)
         A_sig_params_1 = optax.apply_updates(A_sig_params_1, llkh_grad_A_sig_params_1)
 
-        a = np.zeros((nb_classes, nb_channels))
-        b = np.zeros((nb_classes, nb_channels))
-        c = np.zeros((nb_classes, nb_channels))
         ### a coefficients, first need precompute some quantities
-        tmp_X = np.stack([
+        tmp_X = jnp.stack([
             post_marginals_probas[1:, h][:, None] * X[1:] for h in
             range(nb_classes)], axis=1)
-        tmp_X_1 = np.stack([
+        tmp_X_1 = jnp.stack([
             post_marginals_probas[1:, h][:, None] * X[:-1] for h in
             range(nb_classes)], axis=1)
-        tmp_X_1_X = np.stack([
+        tmp_X_1_X = jnp.stack([
             post_marginals_probas[1:, h][:, None] * X[:-1] * X[1:]
             for h in range(nb_classes)], axis=1)
-        tmp_X_1_X_1 = np.stack([
+        tmp_X_1_X_1 = jnp.stack([
             post_marginals_probas[1:, h][:, None] * X[:-1] ** 2
             for h in range(nb_classes)], axis=1)
 
-        for h_t in range(nb_classes):
-            a[h_t] = (1 / np.sum(tmp_X_1_X_1[:, h_t]) *
-                1 / (1 - np.sum(tmp_X_1[:, h_t]) ** 2 /
-                (np.sum(post_marginals_probas[1:, h_t]) *
-                np.sum(tmp_X_1_X_1[:, h_t]))) *
-                (np.sum(tmp_X_1_X[:, h_t]) - np.sum(tmp_X_1[:, h_t]) *
-                np.sum(tmp_X[:, h_t]) / np.sum(post_marginals_probas[1:, h_t])))
+        a = jnp.stack([1 / jnp.sum(tmp_X_1_X_1[:, h_t], axis=0) *
+            1 / (1 - jnp.sum(tmp_X_1[:, h_t], axis=0) ** 2 /
+            (jnp.sum(post_marginals_probas[1:, h_t]) *
+            jnp.sum(tmp_X_1_X_1[:, h_t], axis=0))) *
+            (jnp.sum(tmp_X_1_X[:, h_t], axis=0) - jnp.sum(tmp_X_1[:, h_t], axis=0) *
+            jnp.sum(tmp_X[:, h_t], axis=0) / jnp.sum(post_marginals_probas[1:, h_t]))
+            for h_t in range(nb_classes)],
+            axis=0
+        )
 
-            b[h_t] = ((np.sum(tmp_X[:, h_t]) - a[h_t] * np.sum(tmp_X_1[:, h_t])) /
-                np.sum(post_marginals_probas[1:, h_t]))
+        b = jnp.stack([(jnp.sum(tmp_X[:, h_t], axis=0) - a[h_t]
+                * jnp.sum(tmp_X_1[:, h_t], axis=0)) / 
+            jnp.sum(post_marginals_probas[1:, h_t])
+            for h_t in range(nb_classes)],
+            axis=0
+        )
 
-            c[h_t] = (np.sum(post_marginals_probas[1:, h_t][:, None] *
-                np.square(X[1:] - a[h_t] * X[:-1] - b[h_t])) /
-                np.sum(post_marginals_probas[1:, h_t]))
+        c = jnp.stack([jnp.sum(post_marginals_probas[1:, h_t][:, None] *
+            jnp.square(X[1:] - a[h_t] * X[:-1] - b[h_t]), axis=0) /
+                jnp.sum(post_marginals_probas[1:, h_t])
+                for h_t in range(nb_classes)],
+            axis=0
+        )
+
+        # needed for the carry to keep the same signature when nb_channels==1
+        a = a[..., None] if a.ndim == 1 else a
+        b = b[..., None] if b.ndim == 1 else b
+        c = c[..., None] if c.ndim == 1 else c
 
         # Reconstruct parameters
-        means = np.stack([a[h_t] * X[:-1] + b[h_t] for h_t in
+        means = jnp.stack([a[h_t] * X[:-1] + b[h_t] for h_t in
             range(nb_classes)], axis=0)
-        means = np.swapaxes(means, 1, 2)
-        means = np.concatenate([means[..., 0][..., None], means], axis=2)
-        stds = np.sqrt(np.stack([c for t in range(T)], axis=1))
-        stds[stds < 1e-5] = 1e-5
-        stds = np.swapaxes(stds, 1, 2)
+        means = jnp.swapaxes(means, 1, 2)
+        means = jnp.concatenate([means[..., 0][..., None], means], axis=2)
+        stds = jnp.sqrt(jnp.tile(c[..., None], (1, 1, T))) # None is needed for
+        # tiling to work good, using a for loop on T here destroys the scan lax
+        # and never compiles
+        stds = jnp.where(stds < 1e-5, 1e-5, stds)
 
-        lX_pdf = jnp.stack([jnp.sum(vmap_jax_loggauss(
-            X, jnp.array([means[i, c] for c in range(nb_channels)]),
-                jnp.array([stds[i, c] for c in range(nb_channels)])), axis=0)
-                            for i in range(nb_classes)], axis=0)
-        A = reconstruct_A(T, A_sig_params_0, A_sig_params_1, X,
-            nb_classes=nb_classes)
-        lA = jnp.log(A)
-        llkh_train = jax_compute_llkh(T, lX_pdf, lA, nb_classes=nb_classes,
-            nb_channels=nb_channels)
-        print("likelihood", llkh_train)
+        llkh = compute_llkh_wrapper(A_sig_params_0, A_sig_params_1, means, stds,
+            T, X, nb_channels, nb_classes)
+        llkh = id_print(llkh, what="loglikelihood")
+
+
+        k = id_print(k, what="####### ITERATION #######")
+
+        return (A_sig_params_0, A_sig_params_1, a, b, c, means, stds, opt_state_A_sig_params_0,
+        opt_state_A_sig_params_1), k
+
+    carry = (A_sig_params_0, A_sig_params_1, a, b, c, means, stds,
+        opt_state_A_sig_params_0, opt_state_A_sig_params_1) 
+    (A_sig_params_0, A_sig_params_1, a, b, c, means, stds, opt_state_A_sig_params_0,
+        opt_state_A_sig_params_1), _ = jax.lax.scan(scan_on_iter_loop, carry,
+        jnp.arange(0, nb_iter)
+    )
 
     # final parameters
     T = len(X)
