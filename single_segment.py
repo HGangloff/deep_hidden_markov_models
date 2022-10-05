@@ -67,7 +67,7 @@ def seg_image(img_path, img_name, key):
     if X.ndim == 1:
         X = X[:, None]
 
-    nb_classes = 5
+    nb_classes = 3
     nb_channels = 1
 
     # KMeans segmentation
@@ -92,7 +92,7 @@ def seg_image(img_path, img_name, key):
     # Force CPU computation, nothing is batched here to go on GPU
     cpus = jax.devices("cpu")
     X_cpu = jax.device_put(X, cpus[0])
-    (hmcin_A, hmcin_means, hmcin_stds) = hmcin_EM(T, X_cpu, nb_iter=5,
+    (hmcin_A, hmcin_means, hmcin_stds) = hmcin_EM(T, X_cpu, nb_iter=50,
         A_init=A, means_init=means, stds_init=stds, nb_classes=nb_classes,
         nb_channels=nb_channels)
     hmcin_mpm_seg, _ = hmcin_MPM_segmentation(T, X,
@@ -133,7 +133,7 @@ def seg_image(img_path, img_name, key):
     cpus = jax.devices("cpu")
     X_cpu = jax.device_put(X, cpus[0])
     (pmc_A, pmc_means, pmc_stds, pmc_A_sig_params, pmc_norm_params) = \
-        pmc_gradient_llkh(T, X_cpu, nb_iter=5, A_init=hmcin_A,
+        pmc_gradient_llkh(T, X_cpu, nb_iter=50, A_init=hmcin_A,
         means_init=hmcin_means, stds_init=hmcin_stds,
         alpha=0.01,
         nb_classes=nb_classes, nb_channels=nb_channels)

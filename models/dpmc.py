@@ -20,106 +20,110 @@ from pmc_fb_and_posterior import (jax_log_forward_backward,
     jax_compute_llkh)
 
 def pretrain_networks(X, type_, the_net, the_net_params,
-    pre_seg, AA_init, mmeans_init, sstds_init):
+    pre_seg, AA_init, mmeans_init, sstds_init, nb_classes=2, nb_channels=1):
     '''
     the_net is either A_net or meanvars_net
     '''
     @jax.jit
-    def loss_A(the_net_params_unfrozen, the_net_params_frozen,
-        train_inputs, train_outputs, pre_seg1, pre_seg_1):
+    def loss_A(the_net_params_unfrozen, the_net_params_frozen, batch):
         the_net_params = hk.data_structures.merge(the_net_params_unfrozen,
             the_net_params_frozen)
-        T = len(train_inputs) 
-        r = jnp.squeeze(train_inputs)
+        pre_seg, X, outputs = batch
 
-        inputs = jnp.stack([pre_seg_1, pre_seg_1 * r, r], axis=1)
+        X = X[:-1, :]
+        T = len(X)
+        r = jnp.squeeze(X)
 
-        pred_w2 = jnp.squeeze(jnp.exp(
-                            -the_net.apply(the_net_params, None, inputs)
-                            ))
-        pred_w2 = pred_w2 / (1 + pred_w2)
-        pred_w2 = jnp.where(pred_w2 < 1e-5, 1e-5, pred_w2)
-        pred_w2 = jnp.where(pred_w2 > 0.99999, 0.99999, pred_w2)
-        return -jnp.mean(jnp.log(pred_w2) * train_outputs +
-                jnp.log(1 - pred_w2) * (1 - train_outputs))
-
-    vmap_loss_A_one_batch = jax.vmap(loss_A,
-        in_axes=(None, None, 0, 0, 0, 0))
+        pre_seg_oh = jax.nn.one_hot(pre_seg[:-1], nb_classes - 1)
+        h_times_r = jnp.reshape(
+            vmap_jax_dot(pre_seg_oh[..., None], r[:, None]),
+            #jnp.rollaxis(vmap_jax_dot(pre_seg_oh[..., None], r[:, None]), 0, 2),
+                        (T, - 1))
+        in_ = jnp.concatenate([jnp.reshape(pre_seg_oh, (T, -1)),
+                         h_times_r,
+                         jnp.reshape(r, (T, -1))
+                        ], axis=1)
+        tmp = jnp.exp(the_net.apply(the_net_params, None, in_))
+        tmp = tmp / jnp.sum(tmp, axis=1, keepdims=True)
+        # avoid invalid values in log during the optimization
+        tmp = jnp.where(tmp < 1e-5, 1e-5, tmp)
+        tmp = jnp.where(tmp > 0.99999, 0.99999, tmp)
+        return -np.mean(jnp.log(tmp) * outputs)
 
     @jax.jit
-    def loss_meanvars(the_net_params_unfrozen, the_net_params_frozen,
-        train_inputs, train_outputs, pre_seg1, pre_seg_1):
+    def loss_meanvars(the_net_params_unfrozen, the_net_params_frozen, batch):
         the_net_params = hk.data_structures.merge(the_net_params_unfrozen,
             the_net_params_frozen)
-        T = len(train_inputs)
-        r = jnp.squeeze(train_inputs)
 
-        inputs = jnp.stack([pre_seg1, r, pre_seg_1 * r,
-                        pre_seg1 * r,
-                        pre_seg_1 * pre_seg1 * r],
-                        axis=1)
+        pre_seg, X, outputs = batch
 
-        meanvars = the_net.apply(the_net_params, None, inputs)
-        means = meanvars[..., 0]
-        vars = jnp.square(meanvars[..., 1])
-        return (jnp.mean(jnp.sum(jnp.square(means - train_outputs[0])))
-                +jnp.mean(jnp.sum(jnp.square(vars - train_outputs[1]))))
+        pre_seg1 = pre_seg[1:]
+        pre_seg_1 = pre_seg[:-1]
 
-    vmap_loss_meanvars_one_batch = jax.vmap(loss_meanvars,
-        in_axes=(None, None, 0, 1, 0, 0))
+        X = X[:-1, :]
+        T = len(X)
+        r = jnp.squeeze(X)
 
-    nb_batches = 64
+        pre_seg_oh1 = jax.nn.one_hot(pre_seg1, nb_classes - 1) #pre_seg[1:], nb_classes - 1)
+        pre_seg_oh_1 = jax.nn.one_hot(pre_seg_1, nb_classes - 1) #pre_seg[1:], nb_classes - 1)
+        h_1_times_r = jnp.reshape(
+            vmap_jax_dot(pre_seg_oh_1[..., None], r[:, None]),
+            #jnp.rollaxis(vmap_jax_dot(pre_seg_oh_1[..., None], r[:, None]), 0, 2),
+                        (T, - 1))
+        h1_times_r = jnp.reshape(
+            vmap_jax_dot(pre_seg_oh1[..., None], r[:, None]),
+            #jnp.rollaxis(vmap_jax_dot(pre_seg_oh1[..., None], r[:, None]), 0, 2),
+                        (T, - 1))
+
+        h_1_times_h1_times_r = jnp.reshape(
+            vmap_jax_dot(pre_seg_oh_1[..., None], h1_times_r[:, None]),
+                (T, -1))
+        in_ = jnp.concatenate([jnp.reshape(pre_seg_oh1, (T, -1)),
+                         jnp.reshape(r, (T, -1)),
+                         h_1_times_r, h1_times_r, h_1_times_h1_times_r,
+                        ], axis=1)
+        meanvars = the_net.apply(the_net_params, None, in_)
+        means = meanvars[..., :nb_channels]
+        vars = jnp.square(meanvars[..., nb_channels:])
+
+        return (jnp.mean(jnp.square(means - train_outputs[0]))
+                +jnp.mean(jnp.square(vars - train_outputs[1])))
+
     T = len(X)
+    pre_seg = jnp.asarray(pre_seg)
 
     if type_ == "meanvars":
-        vmap_loss_one_batch = vmap_loss_meanvars_one_batch 
+        loss = loss_meanvars
 
-        alpha = 0.01 
-        num_epochs = 501
-        train_inputs = jnp.reshape(X, (nb_batches, -1)) 
-        train_inputs = train_inputs[:, :-1]
+        # NOTE choose the biggest values that will not make the optim problem
+        # explode
+        alpha = 0.01
+        num_epochs = 500
+
         train_outputs = jnp.stack([
-            mmeans_init[jnp.roll(pre_seg, -1),pre_seg, np.arange(T)],
-            jnp.square(sstds_init[jnp.roll(pre_seg, -1),pre_seg, np.arange(T)])],
+            mmeans_init[jnp.roll(pre_seg, -1), pre_seg, :, np.arange(T)],
+            jnp.square(sstds_init[jnp.roll(pre_seg, -1), pre_seg, :, np.arange(T)])],
             axis=0
         )
-        train_outputs = jnp.reshape(train_outputs, (2, nb_batches, -1))
-        train_outputs = train_outputs[:, :, 1:]
-        pre_seg1 = jnp.reshape(pre_seg[..., None], (nb_batches, -1))
-        pre_seg1 = pre_seg1[:, 1:]
-        pre_seg_1 = jnp.reshape(pre_seg[..., None], (nb_batches, -1))
-        pre_seg_1 = pre_seg_1[:, :-1]
+        train_outputs = train_outputs[:, 1:, :]
 
     elif type_ == "A":
-        vmap_loss_one_batch = vmap_loss_A_one_batch
+        loss = loss_A
 
         alpha = 0.001
-        num_epochs = 300
-        train_inputs = jnp.reshape(X, (nb_batches, -1)) 
-        train_inputs = train_inputs[:, :-1]
-        train_outputs = AA_init[pre_seg[:], jnp.ones((T)).astype(int), jnp.arange(T)]
-        train_outputs = jnp.reshape(train_outputs, (nb_batches, -1))
-        train_outputs = train_outputs[:, :-1]
-        pre_seg1 = jnp.reshape(pre_seg[..., None], (nb_batches, -1))
-        pre_seg1 = pre_seg1[:, 1:]
-        pre_seg_1 = jnp.reshape(pre_seg[..., None], (nb_batches, -1))
-        pre_seg_1 = pre_seg_1[:, :-1]
-
-    @jax.jit
-    def loss(the_net_params_unfrozen, the_net_params_frozen,
-        train_inputs, train_outputs, pre_seg1, pre_seg_1):
-        return jnp.mean(vmap_loss_one_batch(the_net_params_unfrozen,
-            the_net_params_frozen, train_inputs,
-            train_outputs, pre_seg1, pre_seg_1))
+        num_epochs = 500
+        train_outputs = AA_init[pre_seg[:-1], :,
+                                np.arange(T-1)]
 
     the_net_params_unfrozen, the_net_params_frozen = \
         hk.data_structures.partition(
         lambda m, n, p: m != "frozen_layer", the_net_params)
 
     opt = optax.adam(alpha)
-    opt2 = optax.adam(alpha / 1000)
     opt_state_the_net_params_unfrozen = opt.init(the_net_params_unfrozen)
     loss_grad_fun = jax.grad(loss, argnums=0)
+
+    batch = [pre_seg, X, train_outputs]
 
     print("Start pretraining: ", num_epochs, "epoches")
 
@@ -130,15 +134,14 @@ def pretrain_networks(X, type_, the_net, the_net_params,
     def scan_on_epoch_loop(carry, e):
         (the_net_params_unfrozen, opt_state_the_net_params_unfrozen) = carry
         loss_grad_value = loss_grad_fun(the_net_params_unfrozen,
-            the_net_params_frozen, train_inputs,
-            train_outputs, pre_seg1, pre_seg_1)
+            the_net_params_frozen, batch)
         loss_grad_value, opt_state_the_net_params_unfrozen = opt.update(
             loss_grad_value, opt_state_the_net_params_unfrozen)
         the_net_params_unfrozen = optax.apply_updates(the_net_params_unfrozen,
             loss_grad_value)
 
         train_loss = loss(the_net_params_unfrozen, the_net_params_frozen,
-            train_inputs, train_outputs, pre_seg1, pre_seg_1)
+            batch)
 
         e = jax.lax.cond(
             e % print_rate == 0,
@@ -164,51 +167,96 @@ def pretrain_networks(X, type_, the_net, the_net_params,
 
     return the_net_params
 
-@partial(jax.jit, static_argnums=(0, 1))
-def reconstruct_A(T, A_net, A_net_params, X):
+@partial(jax.jit, static_argnums=(0, 1, 4))
+def reconstruct_A(T, A_net, A_net_params, X, nb_classes):
     r = jnp.squeeze(X[:T-1])
     def scan_h_t_1(carry, h_t_1):
         A_net_params = carry
-        h_vec = jnp.full((T - 1, ), h_t_1)
-        Atmp = jnp.squeeze(jnp.exp(-A_net.apply(A_net_params, None,
-                    jnp.array([h_vec, r * h_vec, r]).T)))
-        Atmp = Atmp / (1 + Atmp)
-        return A_net_params, jnp.array([1 - Atmp, Atmp])
+        # one hot encode, note nb_classes -1 to have a [0, 0] vector
+        h_t_1_oh = jax.nn.one_hot(h_t_1, nb_classes - 1, axis=-1)
+        h_t_1_vec = jnp.full((T - 1), h_t_1)
+        h_t_1_vec_oh = jax.nn.one_hot(h_t_1_vec, nb_classes - 1, axis=-1)
+        # NOTE always keep T - 1 on first dimension
+        # Next is : the dot product we need then roll T (brought by r) on first
+        # axis, then reshape and then stack to form the correct input vector
+        h_times_r = jnp.reshape(
+            #jnp.dot(h_t_1_oh[..., None], r[:, None]),
+            vmap_jax_dot(h_t_1_vec_oh[..., None], r[:, None]),
+            #vmap_jax_dot(h_t_1_oh[..., None], r[:, None]),
+            #jnp.rollaxis(vmap_jax_dot(h_t_1_vec_oh[..., None], r[:, None]), 0, 2),
+                        (T - 1, - 1))
+        in_ = jnp.concatenate([jnp.reshape(h_t_1_vec_oh, (T - 1, -1)),
+                         h_times_r,
+                         jnp.reshape(r, (T - 1, -1))
+                        ], axis=1)
+        tmp = jnp.squeeze(jnp.exp(A_net.apply(A_net_params, None, in_)))
+        tmp = tmp.T
+        Atmp = tmp / jnp.sum(tmp, axis=0, keepdims=True)
+        return A_net_params, Atmp
     carry = A_net_params
 
-    _, A = jax.lax.scan(scan_h_t_1, carry, jnp.arange(2))
+    # we get back the stack of samples (ie, the stack of second position return
+    # of the scan function)
+    _, A = jax.lax.scan(scan_h_t_1, carry, jnp.arange(nb_classes))
 
     A = jnp.where(A < 1e-5, 1e-5, A)
     A = jnp.where(A > 0.99999, 0.99999, A)
 
     return A
 
-@partial(jax.jit, static_argnums=(0, 1))
-def reconstruct_means_stds(T, meanvars_net, meanvars_net_params, X):
+@partial(jax.jit, static_argnums=(0, 1, 4, 5))
+def reconstruct_means_stds(T, meanvars_net, meanvars_net_params, X,
+    nb_classes, nb_channels):
 
     X = jnp.concatenate([jnp.asarray(X[1:2]), jnp.asarray(X[:-1])], axis=0)
 
     r = jnp.squeeze(X)
     def scan_h_t_1_h_t(carry, idx):
         meanvars_net_params = carry
-        h_t, h_t_1 = idx % 2, (idx // 2) - 1
+        h_t, h_t_1 = idx % nb_classes, idx // nb_classes # h_t moves the most
+        h_t_oh = jax.nn.one_hot(h_t, nb_classes - 1, axis=-1)
+        h_t_1_oh = jax.nn.one_hot(h_t_1, nb_classes - 1, axis=-1)
+
         h_vec = jnp.full((T, ), h_t)
         h_vec_1 = jnp.full((T, ), h_t_1)
+        h_vec_oh = jax.nn.one_hot(h_vec, nb_classes - 1, axis=-1)
+        h_vec_1_oh = jax.nn.one_hot(h_vec_1, nb_classes - 1, axis=-1)
+
+        h_times_r = jnp.reshape(
+            #jnp.dot(h_t_oh[..., None], r[:, None]),
+            vmap_jax_dot(h_vec_oh[..., None], r[:, None]),
+                    (T, -1))
+        h_1_times_r = jnp.reshape(
+            #jnp.dot(h_t_1_oh[..., None], r[:, None]),
+            vmap_jax_dot(h_vec_1_oh[..., None], r[:, None]),
+                    (T, -1))
+        h_1_times_h_times_r = jnp.reshape(
+            #jnp.dot(h_t_1_oh[..., None], h_times_r[:, None]),
+            vmap_jax_dot(h_vec_1_oh[..., None], h_times_r[:, None]),
+                (T, -1))
+
         meanvars = meanvars_net.apply(meanvars_net_params, None,
-                jnp.array([h_vec, r, h_vec_1 * r,
-                        h_vec * r,
-                        h_vec_1 * h_vec * r]).T)
+                jnp.concatenate([jnp.reshape(h_vec_oh, (T,-1)),
+                        jnp.reshape(r, (T, -1)),
+                        h_1_times_r,
+                        h_times_r,
+                        h_1_times_h_times_r], axis=1))
         return meanvars_net_params, meanvars
     carry = meanvars_net_params
 
     _, meanvars = jax.lax.scan(
         scan_h_t_1_h_t,
         carry,
-        jnp.arange(4)
+        jnp.arange(nb_classes * nb_classes)
     )
 
-    means = meanvars[..., 0].reshape((2, 2, -1))
-    stds = jnp.sqrt(jnp.square(meanvars[..., 1].reshape((2, 2, -1))))
+    meanvars = jnp.reshape(meanvars, (nb_classes, nb_classes, T, -1))
+    # last is nb_channels * 2
+    # next we separe nb_channels and put the channel in in third ie put T dim
+    # at the end
+    means = jnp.moveaxis(meanvars[..., :nb_channels], -1, 2)
+    stds = jnp.moveaxis(jnp.sqrt(jnp.square(meanvars[..., nb_channels:])), -1,
+    2)
     stds = jnp.where(stds < 1e-5, 1e-5, stds)
     return means, stds
 
@@ -216,7 +264,7 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
     stds_init, pre_seg, A_sig_params_init, norm_params_init,
     H_gt=None, with_output_constraint=True,
     with_pretrain=True, alpha=0.01,
-    with_gpu=False):
+    with_gpu=False, nb_classes=2, nb_channels=1):
 
     cpus = jax.devices("cpu")
     try:
@@ -227,10 +275,18 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
     if not with_gpu:
         gpu_available = False
 
-    nb_neurons_on_last_hidden_A = 3
-    nb_neurons_on_input_A = 3
-    nb_neurons_on_last_hidden_mv = 5
-    nb_neurons_on_input_mv = 5
+    nb_neurons_on_last_hidden_A = ((nb_classes - 1) + (nb_classes - 1) * nb_channels +
+                            nb_channels)
+    nb_neurons_on_input_A = ((nb_classes - 1) + (nb_classes - 1) * nb_channels +
+                            nb_channels)
+    nb_neurons_on_last_hidden_mv = (
+        (nb_classes - 1) + nb_channels +  2 * (nb_classes - 1) * nb_channels +
+        (nb_classes - 1) ** 2 * nb_channels
+    )
+    nb_neurons_on_input_mv = (
+        (nb_classes - 1) + nb_channels +  2 * (nb_classes - 1) * nb_channels +
+        (nb_classes - 1) ** 2 * nb_channels
+    )
 
     def A_net_def(x):
         mlp1 = hk.Sequential([
@@ -239,7 +295,7 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
             hk.Linear(nb_neurons_on_last_hidden_A),
         ])
         mlp2 = hk.Sequential([
-            hk.Linear(1, name="frozen_layer")
+            hk.Linear(nb_classes, name="frozen_layer")
             ])
         return mlp2(mlp1(x) + x)
 
@@ -255,7 +311,7 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
             hk.Linear(nb_neurons_on_last_hidden_mv),
         ])
         mlp2 = hk.Sequential([
-            hk.Linear(2, name="frozen_layer")
+            hk.Linear(2 * nb_channels, name="frozen_layer")
             ])
         return mlp2(mlp1(x) + x)
 
@@ -264,9 +320,10 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
     key, subkey = jax.random.split(key)
     meanvars_net_params = meanvars_net.init(subkey, dummy_in_shape)
 
-    @jax.jit
+    @partial(jax.jit, static_argnums=(5, 6))
     def compute_llkh_wrapper_one_batch(A_net_params_unfrozen, A_net_params_frozen,
-        meanvars_net_params_unfrozen, meanvars_net_params_frozen, X):
+        meanvars_net_params_unfrozen, meanvars_net_params_frozen,
+        X, nb_classes, nb_channels):
         T = len(X)
         A_net_params = hk.data_structures.merge(A_net_params_unfrozen,
             A_net_params_frozen)
@@ -274,29 +331,33 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
             meanvars_net_params_unfrozen, meanvars_net_params_frozen)
 
         means, stds = reconstruct_means_stds(T, meanvars_net,
-            meanvars_net_params, X)
+            meanvars_net_params, X,
+            nb_classes=nb_classes, nb_channels=nb_channels)
         lX_pdf = jnp.stack([
-                    jnp.stack([
-                        jax_loggauss(X, means[j, i], stds[j, i])
-                    for i in range(2)], axis=0)
-            for j in range(2)], axis=0)
-        A = reconstruct_A(T, A_net, A_net_params, X)
+                            jnp.stack([
+                jnp.sum(vmap_jax_loggauss(
+                X, means[j, i], stds[j, i]), axis=0)
+                            for i in range(nb_classes)], axis=0)
+            for j in range(nb_classes)], axis=0)
+        A = reconstruct_A(T, A_net, A_net_params, X, nb_classes)
         lA = jnp.log(A)
-        return -jax_compute_llkh(T, lX_pdf, lA)
+        return -jax_compute_llkh(T, lX_pdf, lA, nb_classes)
 
     vmap_compute_llkh_wrapper_one_batch = jax.vmap(
         compute_llkh_wrapper_one_batch,
-        in_axes=(None, None, None, None, 0)
+        in_axes=(None, None, None, None, 0, None, None)
     )
 
-    @jax.jit
+    @partial(jax.jit, static_argnums=(5, 6))
     def compute_llkh_wrapper(A_net_params_unfrozen, A_net_params_frozen,
-        meanvars_net_params_unfrozen, meanvars_net_params_frozen, X):
-        return jnp.mean(
+        meanvars_net_params_unfrozen, meanvars_net_params_frozen,
+        X, nb_classes, nb_channels):
+        return jnp.mean( #mean or sum is of course equivalent (we tested !)
             vmap_compute_llkh_wrapper_one_batch(A_net_params_unfrozen,
             A_net_params_frozen, meanvars_net_params_unfrozen,
-            meanvars_net_params_frozen, X)
+            meanvars_net_params_frozen, X, nb_classes, nb_channels)
         )
+
 
     Llkh_grad_A_net_params_unfrozen = jax.grad(compute_llkh_wrapper,
         argnums=0)
@@ -307,23 +368,70 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
     # next we set the last layer parameters frozen the the equivalent network
     # defined by the non deep parameters
         print("Setting the last layer with non deep values")
-        wei = np.random.randn(5, 2) * 0.01
-        b = np.zeros((2))
-        wei[0, 0] = norm_params_init[1][0, 1] - norm_params_init[1][0, 0]
-        wei[1, 0] = norm_params_init[0][0, 0]
-        wei[2, 0] = norm_params_init[0][1, 0] - norm_params_init[0][0, 0]
-        wei[3, 0] = norm_params_init[0][0, 1] - norm_params_init[0][0, 0]
-        wei[4, 0] = (norm_params_init[0][1, 1] - norm_params_init[0][0, 1]
-                - norm_params_init[0][1, 0] + norm_params_init[0][0, 0])
-        wei[0, 1] = (np.sqrt(norm_params_init[2][0, 1]) -
-            np.sqrt(norm_params_init[2][0, 0]))
-        wei[1, 1] = 0
-        wei[2, 1] = 0
-        wei[3, 1] = 0
-        wei[4, 1] = 0
+        wei = np.zeros((nb_neurons_on_last_hidden_mv, 2, nb_channels))
+        offset = 0
+        for i in range(nb_classes - 1):
+            # w^{0,:} and w^{1, :} of our example
+            wei[i, 0] = (norm_params_init[1][0, i, :] -
+                norm_params_init[1][0, nb_classes - 1, :])
+            # as NOTE, equivalent to:
+            #wei[i, 0] = (norm_params_init[1][1, i, :] -
+            #    norm_params_init[1][1, nb_classes - 1, :])
+        offset = nb_classes - 1
+        for j in range(nb_channels):
+            # w^{2, :} and w^{3, :} of our example
+            wei[offset + j, 0, j] = \
+                norm_params_init[0][nb_classes - 1, nb_classes - 1, j]
+        offset += nb_channels
+        for i in range(nb_classes - 1):
+            # i goes through [1, 0] and [0, 1] in our example
+            for j in range(nb_channels):
+                #w^{4,:} to w^{7,:} of our example
+                wei[offset + i * nb_channels + j, 0, j] = (
+                    norm_params_init[0][i, nb_classes - 1, j] -
+                    norm_params_init[0][nb_classes - 1, nb_classes - 1, j])
+        offset += (nb_classes - 1) * nb_channels
+        for i in range(nb_classes - 1):
+            # i goes through [1, 0] and [0, 1] in our example
+            for j in range(nb_channels):
+                #w^{8,:} to w^{11,:} of our example
+                wei[offset + i * nb_channels + j, 0, j] = (
+                    norm_params_init[0][nb_classes - 1, i, j] -
+                    norm_params_init[0][nb_classes - 1, nb_classes - 1, j])
+        offset += (nb_classes - 1) * nb_channels
+        for i in range(nb_classes - 1):
+            # say it is h_{k-1}
+            # i goes through [1, 0] and [0, 1] in our example
+            for ii in range(nb_classes - 1):
+                # say it is h_k
+                # ii goes through [1, 0] and [0, 1] in our example
+                for j in range(nb_channels):
+                    #w^{12,:} to w^{19,:} of our example
+                    wei[offset + i * (nb_classes - 1) * nb_channels +
+                        ii * nb_channels + j, 0, j] = (
+                        norm_params_init[0][i, ii, j] -
+                        norm_params_init[0][nb_classes - 1, nb_classes - 1, j] -
+                        norm_params_init[0][i, nb_classes - 1, j] -
+                        norm_params_init[0][nb_classes - 1, ii, j])
+        # stds
+        for i in range(nb_classes - 1):
+            wei[i, 1] = (jnp.sqrt(norm_params_init[2][0, i, :])
+                - jnp.sqrt(norm_params_init[2][0, nb_classes - 1, :]))
+            # as NOTE, equivalent to:
+            #wei[i, 1] = (jnp.sqrt(norm_params_init[2][1, i, :])
+            #    - jnp.sqrt(norm_params_init[2][1, nb_classes - 1, :]))
+
+        wei = wei.reshape((nb_neurons_on_last_hidden_mv, -1)) # row major !
+        # (all the means thn all the stds)
         wei = jnp.asarray(wei)
-        b[1] = np.sqrt(norm_params_init[2][0, 0])
-        b[0] = norm_params_init[1][0, 0]
+
+        b = np.zeros((2, nb_channels))
+        # means
+        b[0, :] = norm_params_init[1][0, nb_classes - 1, :]
+        # stds
+        b[1, :] = jnp.sqrt(norm_params_init[2][0, nb_classes - 1, :])
+        b = b.reshape((2 * nb_channels)) # row major (all the means then all
+        # the stds)
         b = jnp.asarray(b)
 
         meanvars_net_params = \
@@ -331,14 +439,25 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         meanvars_net_params['frozen_layer'] = \
             hk.data_structures.to_immutable_dict({'w':wei, 'b':b})
 
-        wei = np.random.randn(3, 1) * 0.01
-        b = np.zeros((1))
-        wei[0] = A_sig_params_init[1][1] - A_sig_params_init[1][0]
-        wei[1] = A_sig_params_init[0][1] - A_sig_params_init[0][0]
-        wei[2] = A_sig_params_init[0][0]
-        b[0] = A_sig_params_init[1][0]
-        b = jnp.asarray(b)
+        A_sig_params_0_init, A_sig_params_1_init = A_sig_params_init
+        wei = np.zeros((nb_neurons_on_last_hidden_A, nb_classes))
+        offset = 0
+        for i in range(nb_classes - 1):
+            wei[i] = (A_sig_params_1_init[i, :] -
+                        A_sig_params_1_init[nb_classes-1, :])
+        offset = nb_classes - 1
+        for i in range(nb_classes - 1):
+            for j in range(nb_channels):
+                wei[offset + i * nb_channels + j] = \
+                        (A_sig_params_0_init[i, :, j] -
+                            A_sig_params_0_init[nb_classes-1, :, j])
+        offset += (nb_classes - 1) * nb_channels
+        for j in range(nb_channels):
+            wei[offset + j] = A_sig_params_0_init[nb_classes-1, :, j]
         wei = jnp.asarray(wei)
+        b = np.zeros((nb_classes))
+        b = A_sig_params_1_init[nb_classes-1, :]
+        b = jnp.asarray(b)
 
         A_net_params = \
             hk.data_structures.to_mutable_dict(A_net_params)
@@ -394,31 +513,29 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
             means_init_gpu = jax.device_put(means_init, gpus[0])
             stds_init_gpu = jax.device_put(stds_init, gpus[0])
             pre_seg_gpu = jax.device_put(pre_seg, gpus[0])
-        else:
-            X_gpu = X
-        try:
+
             meanvars_net_params = pretrain_networks(X_gpu,
                 "meanvars", meanvars_net, meanvars_net_params, 
-                pre_seg_gpu, A_init_gpu, means_init_gpu, stds_init_gpu)
-        except RuntimeError:
-            # probably RESOURCE_EXHAUSTED on the GPU 
-            print("Problem with pretraining on GPU, not enough memory ?")
+                pre_seg_gpu, A_init_gpu, means_init_gpu, stds_init_gpu,
+                nb_classes=nb_classes, nb_channels=nb_channels)
+
+            A_net_params = pretrain_networks(X_gpu, 
+            "A", A_net, A_net_params, pre_seg_gpu,
+                A_init_gpu, means_init_gpu, stds_init_gpu,
+                nb_classes=nb_classes, nb_channels=nb_channels)
+
+        else:
             X_cpu = jax.device_put(X, cpus[0])
             meanvars_net_params = pretrain_networks(X_cpu,
                 "meanvars", meanvars_net, meanvars_net_params,
-                pre_seg_gpu, A_init, means_init, stds_init)
+                pre_seg, A_init, means_init, stds_init,
+                nb_classes=nb_classes, nb_channels=nb_channels)
 
-        try:
-            A_net_params = pretrain_networks(X_gpu, 
-            "A", A_net, A_net_params, pre_seg_gpu,
-                A_init_gpu, means_init_gpu, stds_init_gpu)
-        except RuntimeError:
-            # probably RESOURCE_EXHAUSTED on the GPU 
-            print("Problem with pretraining on GPU, not enough memory ?")
             X_cpu = jax.device_put(X, cpus[0])
             A_net_params = pretrain_networks(X_cpu, 
                 "A", A_net, A_net_params, pre_seg,
-                A_init, means_init, stds_init)
+                A_init, means_init, stds_init,
+                nb_classes=nb_classes, nb_channels=nb_channels)
 
         # NOTE Back to CPU
         meanvars_net_params = jax.device_put(meanvars_net_params, cpus[0])
@@ -436,9 +553,8 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
     ################
 
     nb_batches = 1 #64
-    X_ori = X.copy()
-    T = len(X_ori)
-    X = jnp.reshape(X[..., None], (nb_batches, -1)) 
+    T = len(X)
+    X_batched = jnp.reshape(X[..., None], (nb_batches, -1, nb_channels)) 
 
     opt = optax.adam(alpha)
     opt2 = optax.adam(alpha / 1000)
@@ -457,7 +573,8 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         opt_state_meanvars_net_params_unfrozen) = carry
         llkh_grad_A_net_params_unfrozen = Llkh_grad_A_net_params_unfrozen(
             A_net_params_unfrozen, A_net_params_frozen,
-            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X)
+            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X_batched,
+            nb_classes, nb_channels)
         llkh_grad_A_net_params_unfrozen, opt_state_A_net_params_unfrozen = \
             opt.update(llkh_grad_A_net_params_unfrozen,
                 opt_state_A_net_params_unfrozen)
@@ -465,7 +582,8 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         llkh_grad_meanvars_net_params_unfrozen = \
             Llkh_grad_meanvars_net_params_unfrozen(
             A_net_params_unfrozen, A_net_params_frozen,
-            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X)
+            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X_batched,
+            nb_classes, nb_channels)
         (llkh_grad_meanvars_net_params_unfrozen,
         opt_state_meanvars_net_params_unfrozen) = \
             opt.update(llkh_grad_meanvars_net_params_unfrozen,
@@ -478,9 +596,10 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         meanvars_net_params_unfrozen, llkh_grad_meanvars_net_params_unfrozen)
 
         # compute likelihood to see progree
-        llkh = compute_llkh_wrapper(A_net_params_unfrozen, A_net_params_frozen,
-            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X)
-        llkh = - llkh
+        llkh = compute_llkh_wrapper_one_batch(A_net_params_unfrozen, A_net_params_frozen,
+            meanvars_net_params_unfrozen, meanvars_net_params_frozen, X,
+            nb_classes, nb_channels)
+        llkh = llkh
         k = id_print(k, what="####### ITERATION #######")
         llkh = id_print(llkh / T, what="loglikelihood")
         
@@ -505,26 +624,27 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         meanvars_net_params_frozen)
 
     # final parameters
-    T = len(X_ori)
+    T = len(X)
     means, stds = reconstruct_means_stds(T, meanvars_net,
-        meanvars_net_params, X_ori)
-    A = reconstruct_A(T, A_net, A_net_params, X_ori)
+        meanvars_net_params, X, nb_classes, nb_channels)
+    A = reconstruct_A(T, A_net, A_net_params, X, nb_classes)
 
     return (A, means, stds, (A_net, A_net_params),
         (meanvars_net, meanvars_net_params))
                     
 def MPM_segmentation(T, X, A_net, A_net_params,
-    meanvars_net, meanvars_net_params, H=None):
+    meanvars_net, meanvars_net_params, H=None, nb_classes=2, nb_channels=1):
     means, stds = reconstruct_means_stds(T, meanvars_net,
-        meanvars_net_params, X)
-    A = reconstruct_A(T, A_net, A_net_params, X)
+        meanvars_net_params, X, nb_classes, nb_channels)
+    A = reconstruct_A(T, A_net, A_net_params, X, nb_classes)
     lA = jnp.log(A)
     lX_pdf = jnp.stack([
-                jnp.stack([
-                    jax_loggauss(X, means[j, i], stds[j, i])
-                for i in range(2)], axis=0)
-        for j in range(2)], axis=0)
-    lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA)
+                        jnp.stack([
+            jnp.sum(vmap_jax_loggauss(
+            X, means[j, i], stds[j, i]), axis=0)
+                        for i in range(nb_classes)], axis=0)
+        for j in range(nb_classes)], axis=0)
+    lalpha, lbeta = jax_log_forward_backward(T, lX_pdf, lA, nb_classes)
 
     post_marginals_probas = jax_get_post_marginals_probas(lalpha, lbeta)
 
