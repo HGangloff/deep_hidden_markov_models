@@ -391,30 +391,23 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
             means_init_gpu = jax.device_put(means_init, gpus[0])
             stds_init_gpu = jax.device_put(stds_init, gpus[0])
             pre_seg_gpu = jax.device_put(pre_seg, gpus[0])
-        else:
-            X_gpu = X
 
-        try:
+            A_net_params = pretrain_networks(X_gpu, 
+            "A", A_net, A_net_params, pre_seg_gpu,
+                A_init_gpu, means_init_gpu, stds_init_gpu)
+
             meanvars_net_params = pretrain_networks(X_gpu, "meanvars",
                 meanvars_net, meanvars_net_params,
                 pre_seg_gpu[:len(X)], A_init_gpu,
                 means_init_gpu, stds_init_gpu)
-        except RuntimeError:
-            # probably RESOURCE_EXHAUSTED on the GPU 
-            print("Problem with pretraining on GPU, not enough memory ?")
+
+        else:
             X_cpu = jax.device_put(X, cpus[0])
             meanvars_net_params = pretrain_networks(X_cpu, "meanvars",
                 meanvars_net, meanvars_net_params,
                 pre_seg[:len(X)], A_init,
                 means_init, stds_init)
-        try:
-            A_net_params = pretrain_networks(X_gpu, 
-            "A", A_net, A_net_params, pre_seg_gpu,
-                A_init_gpu, means_init_gpu, stds_init_gpu)
-        except RuntimeError:
-            # probably RESOURCE_EXHAUSTED on the GPU 
-            print("Problem with pretraining on GPU, not enough memory ?")
-            X_cpu = jax.device_put(X, cpus[0])
+
             A_net_params = pretrain_networks(X_cpu, 
             "A", A_net, A_net_params, pre_seg,
                 A_init, means_init, stds_init)

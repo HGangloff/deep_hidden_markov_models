@@ -220,7 +220,11 @@ def seg_moving_means(exp_name, key):
 
 if __name__ == "__main__":
     cpus = jax.devices("cpu")
-    gpus = jax.devices("gpu")
+    try:
+        gpus = jax.devices("gpu")
+    except RuntimeError as e:    
+        print("RuntimeError: ", e)
+        gpus = []
     print(cpus, gpus) # even though jax.devices() only shows the GPU there is
     # always CPU to be found
     #os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = "false" # do not preallocate GPU
