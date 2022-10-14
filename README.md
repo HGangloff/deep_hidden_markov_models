@@ -38,4 +38,8 @@ Currently, you will find the following algorithms:
 
 The code is built with JAX (autotomatic differentiation) and Haiku (deep neural networks). For efficiency, the backpropagation pretrainings are performed on GPU while the likelihood maximizations are performed on CPU.
 
+The code for multi-class segmentation is in the `mcmc` branch 
+(Multi-Class Multi-Channel branch)
+that is still under development and will be merge to master soon.
+
 For more details, refer to the publication.
