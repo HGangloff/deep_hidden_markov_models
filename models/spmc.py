@@ -168,7 +168,7 @@ def gradient_llkh(T, X, nb_iter, A_init, means_init,
         # and never compiles
         stds = jnp.where(stds < 1e-5, 1e-5, stds)
 
-        llkh = compute_llkh_wrapper(A_sig_params_0, A_sig_params_1, means, stds,
+        llkh = -compute_llkh_wrapper(A_sig_params_0, A_sig_params_1, means, stds,
             T, X, nb_channels, nb_classes)
         llkh = id_print(llkh, what="loglikelihood")
 

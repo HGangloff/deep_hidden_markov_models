@@ -516,7 +516,7 @@ def gradient_llkh(T, X, key, nb_iter, A_init, means_init,
         meanvars_net_params_unfrozen, llkh_grad_meanvars_net_params_unfrozen)
 
         # compute likelihood to see the progress
-        llkh = compute_llkh_wrapper_one_batch(A_net_params_unfrozen, A_net_params_frozen,
+        llkh = -compute_llkh_wrapper_one_batch(A_net_params_unfrozen, A_net_params_frozen,
             meanvars_net_params_unfrozen, meanvars_net_params_frozen, X,
             nb_classes, nb_channels)
 
